@@ -108,23 +108,22 @@ window.CONFIG = {
   // ========== 3D地球儀設定 ==========
   GLOBE: {
     RADIUS: 100,
-    // 地球テクスチャ（すべて無料・APIキー不要、three-globeパッケージの公開アセットをCDN経由で使用）
+    // 地球テクスチャ
+    // ※ unpkg.com は GitHub Pages から CORS でブロックされる場合があるため
+    //   jsDelivr (npm CDN) 経由に変更。three-globe@2.31.0 のアセットをそのまま使用。
     TEXTURES: {
-      // 標準（プレートカラー風の自然な地球） — 衛星写真と区別するためコントラストを変えて使用
-      standard:  'https://unpkg.com/three-globe@2.31.0/example/img/earth-blue-marble.jpg',
-      // 衛星写真（フォトリアルなBlue Marble）
-      satellite: 'https://unpkg.com/three-globe@2.31.0/example/img/earth-blue-marble.jpg',
-      // 地形（バンプマップをベースカラーとしても使用し、起伏を強調）
-      terrain:   'https://unpkg.com/three-globe@2.31.0/example/img/earth-topology.png',
+      standard:  'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-blue-marble.jpg',
+      satellite: 'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-blue-marble.jpg',
+      terrain:   'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-topology.png',
     },
-    BUMP_MAP:     'https://unpkg.com/three-globe@2.31.0/example/img/earth-topology.png',
-    SPECULAR_MAP: 'https://unpkg.com/three-globe@2.31.0/example/img/earth-water.png',
-    CLOUDS_MAP:   'https://unpkg.com/three-globe@2.31.0/example/img/fair_clouds_4k.png',
-    STARFIELD:    'https://unpkg.com/three-globe@2.31.0/example/img/night-sky.png',
-    PIN_PIXEL_SIZE: 14,      // ピンの画面上での一定サイズ(px相当)
-    MIN_ZOOM_DIST: 105,      // カメラがこれ以上近づけない距離
-    MAX_ZOOM_DIST: 420,      // カメラがこれ以上離れられない距離
-    DEFAULT_DIST: 260,
+    BUMP_MAP:     'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-topology.png',
+    SPECULAR_MAP: 'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-water.png',
+    CLOUDS_MAP:   'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/fair_clouds_4k.png',
+    STARFIELD:    'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/night-sky.png',
+    PIN_PIXEL_SIZE: 14,
+    MIN_ZOOM_DIST:  105,
+    MAX_ZOOM_DIST:  420,
+    DEFAULT_DIST:   260,
   },
 
   // ========== 都道府県・主要都市 検索用座標データ ==========
