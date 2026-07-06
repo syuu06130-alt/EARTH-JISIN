@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>🌍 JISHIN.WATCH — 3D地球儀リアルタイム地震監視</title>
+<meta name="description" content="Three.js 3D地球儀で世界の地震をリアルタイム監視。震源地・マグニチュード・震度分布を球体地球上に可視化。" />
+<link rel="stylesheet" href="css/style.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+
+<!-- Three.js r134 (script tag legacy build: THREE グローバルを使用) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js" crossorigin="anonymous"></script>
+<!-- OrbitControls r134 legacy build (THREE.OrbitControls にアタッチ) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/examples/js/controls/OrbitControls.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+<!-- ============ 緊急通知オーバーレイ ============ -->
+<div class="emergency-overlay" id="emergencyOverlay">
+  <div class="emergency-box" id="emergencyBox">
+    <div class="emergency-icon" id="emergencyIcon">⚠️</div>
+    <div class="emergency-title" id="emergencyTitle">大地震が発生しています</div>
+    <div class="emergency-sub" id="emergencySub"></div>
+    <div class="emergency-ring r1"></div>
+    <div class="emergency-ring r2"></div>
+    <div class="emergency-ring r3"></div>
+  </div>
+</div>
+
+<!-- 津波警報オーバーレイ -->
+<div class="tsunami-overlay" id="tsunamiOverlay">
+  <div class="tsunami-stripes"></div>
+  <div class="tsunami-box">
+    <div class="tsunami-icon">🌊</div>
+    <div class="tsunami-title">津波警報が出ています</div>
+    <div class="tsunami-sub">直ちに高台へ避難してください</div>
+    <div class="tsunami-sub2" id="tsunamiDetail"></div>
+  </div>
+</div>
+
+<!-- ============ ヘッダー ============ -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo">
+      <span class="logo-icon">🌍</span>
+      <div class="logo-text">
+        <span class="logo-main">JISHIN.WATCH</span>
+        <span class="logo-sub">3D地球儀 リアルタイム監視</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 検索ボックス（Nominatim: 世界中の地名） -->
+  <div class="header-search">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="searchInput" class="search-input"
+           placeholder="地名検索（東京・Paris・新宿区・Mount Fuji など）"
+           autocomplete="off" spellcheck="false" />
+    <div class="search-results" id="searchResults"></div>
+  </div>
+
+  <div class="header-center">
+    <div class="status-bar">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">監視中...</span>
+    </div>
+    <div class="live-time" id="liveTime"></div>
+  </div>
+  <div class="header-right">
+    <div class="stat-chip">
+      <span class="chip-label">本日</span>
+      <span class="chip-value" id="todayCount">-</span>
+    </div>
+    <div class="stat-chip">
+      <span class="chip-label">表示中</span>
+      <span class="chip-value" id="monthCount">-</span>
+    </div>
+    <button class="btn-alert" id="bigScreenToggle" title="大画面モード">⛶</button>
+    <button class="btn-alert" id="alertToggle"    title="アラート設定">🔔</button>
+  </div>
+</header>
+
+<!-- ============ 大画面モード ============ -->
+<div class="bigscreen" id="bigscreenPanel">
+  <div class="bigscreen-bar">
+    <span class="bigscreen-title">🌍 3D地球儀 大画面モード</span>
+    <button class="bigscreen-close" id="bigscreenClose">✕ 閉じる</button>
+  </div>
+  <div id="bigMap"></div>
+</div>
+
+<!-- ============ メインレイアウト ============ -->
+<div class="app-layout">
+
+  <!-- 左サイドバー -->
+  <aside class="sidebar-left">
+
+    <!-- 速報パネル -->
+    <div class="panel panel-alert" id="latestAlert">
+      <div class="panel-header">
+        <span class="panel-icon">🚨</span>
+        <span>最新地震速報</span>
+        <span class="live-badge">LIVE</span>
+      </div>
+      <div class="latest-quake" id="latestQuakeInfo">
+        <div class="loading-pulse">データ取得中...</div>
+      </div>
+    </div>
+
+    <!-- 震度スケール -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-icon">📊</span>
+        <span>震度スケール</span>
+      </div>
+      <div class="scale-list">
+        <div class="scale-item" data-scale="7">  <span class="scale-badge s7">7</span>  <span class="scale-label">激震</span><span class="scale-desc">ほとんどの建物が倒壊</span></div>
+        <div class="scale-item" data-scale="6+"><span class="scale-badge s6p">6強</span><span class="scale-label">烈震</span><span class="scale-desc">多くの建物が倒壊</span></div>
+        <div class="scale-item" data-scale="6-"><span class="scale-badge s6m">6弱</span><span class="scale-label">烈震</span><span class="scale-desc">立つことが困難</span></div>
+        <div class="scale-item" data-scale="5+"><span class="scale-badge s5p">5強</span><span class="scale-label">強震</span><span class="scale-desc">家具が転倒する</span></div>
+        <div class="scale-item" data-scale="5-"><span class="scale-badge s5m">5弱</span><span class="scale-label">強震</span><span class="scale-desc">棚の食器が落ちる</span></div>
+        <div class="scale-item" data-scale="4">  <span class="scale-badge s4">4</span>   <span class="scale-label">中震</span><span class="scale-desc">眠っている人が目覚める</span></div>
+        <div class="scale-item" data-scale="3">  <span class="scale-badge s3">3</span>   <span class="scale-label">弱震</span><span class="scale-desc">棚の食器が揺れる</span></div>
+        <div class="scale-item" data-scale="2">  <span class="scale-badge s2">2</span>   <span class="scale-label">軽震</span><span class="scale-desc">電灯などが揺れる</span></div>
+        <div class="scale-item" data-scale="1">  <span class="scale-badge s1">1</span>   <span class="scale-label">微震</span><span class="scale-desc">屋内で静かな人が感じる</span></div>
+      </div>
+    </div>
+
+    <!-- ★ フィルター（Mスライダー＋推定震度の連動表示） -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-icon">🎚️</span>
+        <span>表示フィルター</span>
+      </div>
+
+      <!-- マグニチュード＋震度フィルター -->
+      <div class="filter-group">
+        <label class="filter-label">
+          最小マグニチュード
+          <span class="intensity-hint" id="intensityVal" style="float:right;font-size:10px;color:var(--accent)"></span>
+        </label>
+        <input type="range" id="magFilter" min="0" max="9" step="0.1" value="0" class="slider mag-slider" />
+        <div class="mag-filter-row">
+          <span class="slider-val">M <span id="magVal">0.0</span>+</span>
+          <span class="intensity-badge" id="intensityBadge"></span>
+        </div>
+        <!-- 震度目安の凡例バー -->
+        <div class="intensity-scale-bar">
+          <div class="ib-cell" title="震度1〜" style="background:#4fc3f7">1</div>
+          <div class="ib-cell" title="震度2〜" style="background:#00e5ff">2</div>
+          <div class="ib-cell" title="震度3〜" style="background:#7fff00">3</div>
+          <div class="ib-cell" title="震度4〜" style="background:#ffff00;color:#333">4</div>
+          <div class="ib-cell" title="震度5弱〜" style="background:#ffa500;color:#333">5弱</div>
+          <div class="ib-cell" title="震度5強〜" style="background:#ff6900">5強</div>
+          <div class="ib-cell" title="震度6弱〜" style="background:#ff2800">6弱</div>
+          <div class="ib-cell" title="震度6強〜" style="background:#e50000">6強</div>
+          <div class="ib-cell" title="震度7〜"   style="background:#9b0000">7</div>
+        </div>
+        <div style="font-size:9px;color:var(--text-3);margin-top:2px">
+          ※ 推定震度は震源直上の目安値です（深さ・距離で変動）
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">期間</label>
+        <select id="periodFilter" class="select">
+          <option value="1">過去1時間</option>
+          <option value="6">過去6時間</option>
+          <option value="24" selected>過去24時間</option>
+          <option value="72">過去3日間</option>
+          <option value="168">過去1週間</option>
+          <option value="720">過去30日間</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">表示レイヤー</label>
+        <div class="toggle-group">
+          <label class="toggle"><input type="checkbox" id="showEpicenter" checked /><span>震源地ピン</span></label>
+          <label class="toggle"><input type="checkbox" id="showWave"      checked /><span>波紋アニメ</span></label>
+          <label class="toggle"><input type="checkbox" id="showFault"            /><span>断層帯</span></label>
+          <label class="toggle"><input type="checkbox" id="showPlate"            /><span>プレート境界</span></label>
+        </div>
+      </div>
+
+      <div class="filter-group">
+        <label class="filter-label">自動更新間隔</label>
+        <select id="refreshInterval" class="select">
+          <option value="1000">毎秒（1秒）</option>
+          <option value="5000">5秒ごと</option>
+          <option value="15000">15秒ごと</option>
+          <option value="30000" selected>30秒ごと</option>
+          <option value="60000">1分ごと</option>
+        </select>
+      </div>
+
+      <button class="btn-primary" id="applyFilter">適用</button>
+    </div>
+
+    <!-- 防災情報リンク -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-icon">🛟</span>
+        <span>防災・避難情報</span>
+      </div>
+      <div class="link-list">
+        <a href="https://www.jma.go.jp/bosai/map.html#5/34.5/139/&elem=int&contents=earthquake_map" target="_blank" class="info-link">🏛️ 気象庁 地震情報</a>
+        <a href="https://www.jma.go.jp/bosai/map.html#5/34.5/139/&elem=tsunami&contents=tsunami"    target="_blank" class="info-link">🌊 気象庁 津波情報</a>
+        <a href="https://www.bousai.go.jp/"                                                          target="_blank" class="info-link">🏢 内閣府 防災情報</a>
+        <a href="https://www.bousai.go.jp/kyoiku/keigo/hinanjouhou.html"                             target="_blank" class="info-link">🚸 避難情報ガイドライン</a>
+        <a href="https://www.jma.go.jp/bosai/nowc/"                                                  target="_blank" class="info-link">🌀 気象庁 今後の雨</a>
+        <a href="https://www.hinanmap.go.jp/"                                                        target="_blank" class="info-link">🗺️ 重ねるハザードマップ</a>
+        <a href="https://disaportal.gsi.go.jp/"                                                      target="_blank" class="info-link">📍 ハザードマップポータル</a>
+        <a href="https://safety.disaster-i.net/"                                                     target="_blank" class="info-link">🚇 鉄道運行情報</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ★ 地図エリア（3D地球儀） -->
+  <main class="map-area">
+    <div id="map"></div>
+
+    <!-- 地図ツールバー -->
+    <div class="map-toolbar">
+      <button class="map-btn active" id="btn2d"       title="標準表示">🗺️ 標準</button>
+      <button class="map-btn"        id="btnSatellite" title="衛星写真">🛰️ 衛星</button>
+      <button class="map-btn"        id="btnTerrain"   title="地形表示">⛰️ 地形</button>
+      <!-- ★ 衛星モード専用：地名表示オン/オフ（switchTile で表示/非表示） -->
+      <button class="map-btn"        id="btnLabels"    title="地名・国名を表示" style="display:none">🏷️ 地名</button>
+      <div class="toolbar-sep"></div>
+      <button class="map-btn" id="btnReset"   title="全体表示">🌍 全体</button>
+      <button class="map-btn" id="btnHeatmap" title="密度表示">🔥 密度</button>
+    </div>
+
+    <!-- M5以上アラートバナー -->
+    <div class="alert-banner" id="alertBanner" style="display:none;">
+      <span class="alert-banner-icon">🚨</span>
+      <span id="alertBannerText"></span>
+      <button onclick="document.getElementById('alertBanner').style.display='none'">✕</button>
+    </div>
+  </main>
+
+  <!-- 右サイドバー -->
+  <aside class="sidebar-right">
+    <div class="tab-bar">
+      <button class="tab active" data-tab="list">📋 一覧</button>
+      <button class="tab" data-tab="stats">📈 統計</button>
+      <button class="tab" data-tab="news">📰 ニュース</button>
+      <button class="tab" data-tab="history">📜 過去</button>
+      <button class="tab" data-tab="bot">🤖 Bot</button>
+    </div>
+
+    <!-- 地震一覧 -->
+    <div class="tab-content active" id="tab-list">
+      <div class="list-header">
+        <span id="quakeListCount">読み込み中...</span>
+        <button class="btn-refresh" id="refreshBtn" title="更新">🔄 更新</button>
+      </div>
+      <div class="quake-list" id="quakeList">
+        <div class="loading-pulse">データ取得中...</div>
+      </div>
+    </div>
+
+    <!-- 統計 -->
+    <div class="tab-content" id="tab-stats">
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-icon">📅</div><div class="stat-num" id="stat24h">-</div><div class="stat-lbl">期間内件数</div></div>
+        <div class="stat-card"><div class="stat-icon">⚡</div><div class="stat-num" id="statMaxMag">-</div><div class="stat-lbl">最大M</div></div>
+        <div class="stat-card"><div class="stat-icon">📏</div><div class="stat-num" id="statAvgDepth">-</div><div class="stat-lbl">平均震源深度</div></div>
+        <div class="stat-card"><div class="stat-icon">🌊</div><div class="stat-num" id="statTsunami">-</div><div class="stat-lbl">津波注意件数</div></div>
+      </div>
+      <div class="chart-area"><div class="chart-title">マグニチュード分布</div><canvas id="magChart" width="280" height="140"></canvas></div>
+      <div class="chart-area"><div class="chart-title">時間別発生件数（24h）</div><canvas id="timeChart" width="280" height="140"></canvas></div>
+      <div class="chart-area"><div class="chart-title">震源深度分布</div><canvas id="depthChart" width="280" height="140"></canvas></div>
+    </div>
+
+    <!-- ニュース -->
+    <div class="tab-content" id="tab-news">
+      <div class="news-header"><span>🔴 地震関連ニュース</span><span class="live-badge">LIVE</span></div>
+      <div id="newsFeed" class="news-feed"><div class="loading-pulse">ニュース取得中...</div></div>
+    </div>
+
+    <!-- 過去の大地震 -->
+    <div class="tab-content" id="tab-history">
+      <div class="news-header"><span>📜 過去の大地震アーカイブ</span></div>
+      <div id="historyList" class="history-list"></div>
+    </div>
+
+    <!-- Bot -->
+    <div class="tab-content" id="tab-bot">
+      <div class="bot-header">
+        <span class="bot-icon">🤖</span>
+        <div>
+          <div class="bot-name">地震監視Bot</div>
+          <div class="bot-status" id="botStatus">稼働中</div>
+        </div>
+      </div>
+      <div class="bot-log" id="botLog"></div>
+      <div class="bot-controls">
+        <button class="bot-btn active" id="botToggle">Bot 停止</button>
+        <button class="bot-btn" id="botClear">ログ消去</button>
+      </div>
+      <div class="bot-config">
+        <div class="config-title">アラート設定</div>
+        <label class="config-row"><span>M3.0以上で通知</span>        <input type="checkbox" id="alertM3" checked /></label>
+        <label class="config-row"><span>M5.0以上でバナー表示</span>   <input type="checkbox" id="alertM5" checked /></label>
+        <label class="config-row"><span>M6.0以上で緊急全画面警告</span><input type="checkbox" id="alertEmergency" checked /></label>
+        <label class="config-row"><span>津波注意報を強調表示</span>    <input type="checkbox" id="alertTsunami" checked /></label>
+        <label class="config-row"><span>音声アラート</span>            <input type="checkbox" id="alertSound" /></label>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- ============ JS: config→map→data→...の順に読み込む ============ -->
+<script src="js/config.js"></script>
+<script src="js/map.js"></script>
+<script src="js/data.js"></script>
+<script src="js/bot.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/news.js"></script>
+<script src="js/history.js"></script>
+<script src="js/search.js"></script>
+<script src="js/alerts.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
