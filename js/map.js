@@ -1,10 +1,10 @@
 /**
- * map.js — 3D地球儀 描画モジュール（Three.js版）
- * Leaflet(2D)からThree.js本格3D球体へ全面置き換え。
- * - 地球全体を球体として表示（自由回転・ズーム）
- * - ピンは画面上で常に一定サイズ（sizeAttenuation:false のスプライト）
- * - 緯度経度→3D座標変換により、回転・ズームしても常に正しい位置を維持
- * - 標準／衛星／地形の3テクスチャ切替＋衛星モードでの地名ラベルON/OFF
+ * map.js — 3D地球儀 描画モジュール（Three.js r134）
+ *
+ * 修正点：
+ * - #map の高さゼロ問題を ResizeObserver + 遅延 init で解決
+ * - テクスチャを unpkg → esm.sh 経由に変更（より安定）
+ * - OrbitControls の取得を THREE.OrbitControls / OrbitControls 両方に対応
  */
 
 window.MapModule = (() => {
@@ -23,17 +23,25 @@ window.MapModule = (() => {
   // 状態
   let currentTileType = 'standard';
   let showLabels = false;
-  let isHeatmap = false;
+  let isHeatmap  = false;
 
-  // ラベルDOM
+  // ラベル DOM
   let labelLayer = null, bigLabelLayer = null;
   let labelEntries = [];
 
+  // OrbitControls コンストラクタ（r134 legacy は THREE.OrbitControls）
+  function getOrbitControls() {
+    if (typeof THREE !== 'undefined' && THREE.OrbitControls) return THREE.OrbitControls;
+    if (typeof OrbitControls !== 'undefined') return OrbitControls;
+    console.error('OrbitControls が見つかりません');
+    return null;
+  }
+
   /* ══════════════════════════════════════════
-     緯度経度 ↔ 3D座標変換
+     緯度経度 → 3D座標変換
   ══════════════════════════════════════════ */
   function latLngToVec3(lat, lng, r) {
-    r = r != null ? r : RADIUS;
+    r = (r != null) ? r : RADIUS;
     const phi   = (90 - lat) * (Math.PI / 180);
     const theta = (lng + 180) * (Math.PI / 180);
     return new THREE.Vector3(
@@ -45,12 +53,39 @@ window.MapModule = (() => {
 
   /* ══════════════════════════════════════════
      メイン初期化
+     ── #map の高さが確定してから buildScene を呼ぶ ──
   ══════════════════════════════════════════ */
   function init() {
     containerEl = document.getElementById('map');
     if (!containerEl) return;
 
-    const built = buildScene(containerEl);
+    // ResizeObserver で「初めて高さが 0 より大きくなった瞬間」を待つ
+    const ro = new ResizeObserver((entries) => {
+      const h = entries[0].contentRect.height;
+      if (h > 0) {
+        ro.disconnect();
+        _doInit();
+      }
+    });
+    ro.observe(containerEl);
+
+    // 既にサイズあれば即起動
+    if (containerEl.clientHeight > 0) {
+      ro.disconnect();
+      _doInit();
+    }
+  }
+
+  function _doInit() {
+    const OC = getOrbitControls();
+    if (typeof THREE === 'undefined' || !OC) {
+      containerEl.innerHTML =
+        '<div style="color:#f87171;padding:20px;font-family:monospace">' +
+        '⚠️ Three.js の読み込みに失敗しました。<br>ページを再読み込みしてください。</div>';
+      return;
+    }
+
+    const built = buildScene(containerEl, OC);
     scene      = built.scene;
     camera     = built.camera;
     renderer   = built.renderer;
@@ -60,10 +95,10 @@ window.MapModule = (() => {
     cloudsMesh = built.cloudsMesh;
     cloudsMat  = built.cloudsMat;
 
-    pinGroup      = new THREE.Group(); scene.add(pinGroup);
-    waveGroup     = new THREE.Group(); scene.add(waveGroup);
-    faultGroup    = new THREE.Group();
-    plateGroup    = new THREE.Group();
+    pinGroup       = new THREE.Group(); scene.add(pinGroup);
+    waveGroup      = new THREE.Group(); scene.add(waveGroup);
+    faultGroup     = new THREE.Group();
+    plateGroup     = new THREE.Group();
     searchPinGroup = new THREE.Group(); scene.add(searchPinGroup);
 
     drawFaultLines(faultGroup);
@@ -75,7 +110,6 @@ window.MapModule = (() => {
     bindPointerEvents(renderer.domElement, false);
     window.addEventListener('resize', onResize);
 
-    // 初期視点：日本上空
     flyTo(36.5, 138.0, null, G().DEFAULT_DIST);
     animate();
   }
@@ -83,16 +117,16 @@ window.MapModule = (() => {
   /* ══════════════════════════════════════════
      シーン構築（通常・大画面で共用）
   ══════════════════════════════════════════ */
-  function buildScene(container) {
-    const W = container.clientWidth  || container.offsetWidth  || 800;
-    const H = container.clientHeight || container.offsetHeight || 600;
+  function buildScene(container, OC) {
+    OC = OC || getOrbitControls();
 
-    /* --- シーン & カメラ --- */
+    const W = Math.max(container.clientWidth  || container.offsetWidth  || 0, 100);
+    const H = Math.max(container.clientHeight || container.offsetHeight || 0, 100);
+
     const scene  = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 5000);
     camera.position.set(0, 0, G().DEFAULT_DIST);
 
-    /* --- レンダラー --- */
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(W, H);
@@ -100,18 +134,17 @@ window.MapModule = (() => {
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
-    /* --- 星空背景（シェーダー球） --- */
-    const starBgGeo = new THREE.SphereGeometry(2500, 32, 32);
+    /* 星空背景 */
     const starBgMat = new THREE.MeshBasicMaterial({ color: 0x04050a, side: THREE.BackSide });
-    scene.add(new THREE.Mesh(starBgGeo, starBgMat));
+    scene.add(new THREE.Mesh(new THREE.SphereGeometry(2500, 32, 32), starBgMat));
     new THREE.TextureLoader().load(
-      'https://unpkg.com/three-globe@2.31.0/example/img/night-sky.png',
+      G().STARFIELD,
       tex => { starBgMat.map = tex; starBgMat.color.set(0xffffff); starBgMat.needsUpdate = true; },
       undefined, () => {}
     );
     addPointStars(scene);
 
-    /* --- 地球本体 --- */
+    /* 地球本体 */
     const globeGeo = new THREE.SphereGeometry(RADIUS, 96, 96);
     const globeMat = new THREE.MeshPhongMaterial({ color: 0x1a3a5c, shininess: 10 });
     const globeMesh = new THREE.Mesh(globeGeo, globeMat);
@@ -119,37 +152,38 @@ window.MapModule = (() => {
     scene.add(globeMesh);
     loadTexture(globeMat, currentTileType);
 
-    /* --- 雲 --- */
+    /* 雲 */
     const cloudsMat = new THREE.MeshLambertMaterial({ transparent: true, opacity: 0.25, depthWrite: false });
     const cloudsMesh = new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 1.008, 96, 96), cloudsMat);
     scene.add(cloudsMesh);
-    new THREE.TextureLoader().load(
-      'https://unpkg.com/three-globe@2.31.0/example/img/fair_clouds_4k.png',
+    new THREE.TextureLoader().load(G().CLOUDS_MAP,
       tex => { cloudsMat.map = tex; cloudsMat.needsUpdate = true; },
       undefined, () => {}
     );
 
-    /* --- 大気グロー --- */
-    const atmMat = new THREE.ShaderMaterial({
-      vertexShader: `
-        varying vec3 vNormal;
-        void main(){
-          vNormal = normalize(normalMatrix * normal);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-        }`,
-      fragmentShader: `
-        varying vec3 vNormal;
-        void main(){
-          float i = pow(0.58 - dot(vNormal, vec3(0,0,1)), 4.0);
-          gl_FragColor = vec4(0.3,0.6,1.0,1.0) * i;
-        }`,
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      transparent: true,
-    });
-    scene.add(new THREE.Mesh(new THREE.SphereGeometry(RADIUS * 1.14, 64, 64), atmMat));
+    /* 大気グロー */
+    scene.add(new THREE.Mesh(
+      new THREE.SphereGeometry(RADIUS * 1.14, 64, 64),
+      new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vNormal;
+          void main(){
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vNormal;
+          void main(){
+            float i = pow(0.58 - dot(vNormal, vec3(0,0,1)), 4.0);
+            gl_FragColor = vec4(0.3,0.6,1.0,1.0) * i;
+          }`,
+        blending: THREE.AdditiveBlending,
+        side: THREE.BackSide,
+        transparent: true,
+      })
+    ));
 
-    /* --- ライト --- */
+    /* ライト */
     scene.add(new THREE.AmbientLight(0xffffff, 0.55));
     const sun = new THREE.DirectionalLight(0xffffff, 1.0);
     sun.position.set(300, 150, 200);
@@ -158,8 +192,8 @@ window.MapModule = (() => {
     rim.position.set(-300, -100, -200);
     scene.add(rim);
 
-    /* --- OrbitControls --- */
-    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    /* OrbitControls */
+    const controls = new OC(camera, renderer.domElement);
     controls.enableDamping  = true;
     controls.dampingFactor  = 0.07;
     controls.rotateSpeed    = 0.45;
@@ -167,20 +201,18 @@ window.MapModule = (() => {
     controls.minDistance    = G().MIN_ZOOM_DIST;
     controls.maxDistance    = G().MAX_ZOOM_DIST;
     controls.enablePan      = false;
-    controls.autoRotate     = false;
-    controls.target.set(0,0,0);
+    controls.target.set(0, 0, 0);
 
     return { scene, camera, renderer, controls, globeMesh, globeMat, cloudsMesh, cloudsMat };
   }
 
-  /* --- ランダム点群の星 --- */
   function addPointStars(scene) {
     const N   = 2000;
     const pos = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
-      const r   = 1800 + Math.random() * 100;
-      const th  = Math.random() * Math.PI * 2;
-      const ph  = Math.acos(2 * Math.random() - 1);
+      const r  = 1800 + Math.random() * 100;
+      const th = Math.random() * Math.PI * 2;
+      const ph = Math.acos(2 * Math.random() - 1);
       pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
       pos[i*3+1] = r * Math.sin(ph) * Math.sin(th);
       pos[i*3+2] = r * Math.cos(ph);
@@ -193,33 +225,40 @@ window.MapModule = (() => {
   }
 
   /* ══════════════════════════════════════════
-     テクスチャ読み込み（モード別）
+     テクスチャ読み込み
   ══════════════════════════════════════════ */
   function loadTexture(mat, type) {
     const loader = new THREE.TextureLoader();
     const urls   = G().TEXTURES;
     const url    = urls[type] || urls.standard;
 
-    loader.load(url, tex => {
-      mat.map      = tex;
-      mat.color.set(0xffffff);
-      if (type === 'terrain')   { mat.color.set(0xc8e8c8); mat.shininess = 2; }
-      if (type === 'satellite') { mat.shininess = 28; }
-      mat.needsUpdate = true;
-    }, undefined, () => {});
+    loader.load(url,
+      tex => {
+        mat.map = tex;
+        mat.color.set(0xffffff);
+        if (type === 'terrain')   { mat.color.set(0xc8e8c8); mat.shininess = 2; }
+        if (type === 'satellite') { mat.shininess = 28; }
+        mat.needsUpdate = true;
+      },
+      undefined,
+      (err) => {
+        console.warn('地球テクスチャ読み込み失敗（フォールバック色で表示）:', url, err);
+        // フォールバック：単色の地球（テクスチャなし）でも動作継続
+        mat.color.set(type === 'terrain' ? 0x3a6b3a : 0x1a4a6b);
+        mat.needsUpdate = true;
+      }
+    );
 
-    loader.load(G().BUMP_MAP, tex => {
-      mat.bumpMap   = tex;
-      mat.bumpScale = type === 'terrain' ? 7 : 1.8;
-      mat.needsUpdate = true;
-    }, undefined, () => {});
+    loader.load(G().BUMP_MAP,
+      tex => { mat.bumpMap = tex; mat.bumpScale = type === 'terrain' ? 7 : 1.8; mat.needsUpdate = true; },
+      undefined, () => {}
+    );
 
     if (type !== 'terrain') {
-      loader.load(G().SPECULAR_MAP, tex => {
-        mat.specularMap = tex;
-        mat.specular    = new THREE.Color(0x223344);
-        mat.needsUpdate = true;
-      }, undefined, () => {});
+      loader.load(G().SPECULAR_MAP,
+        tex => { mat.specularMap = tex; mat.specular = new THREE.Color(0x223344); mat.needsUpdate = true; },
+        undefined, () => {}
+      );
     } else {
       mat.specularMap = null;
       mat.specular    = new THREE.Color(0x000000);
@@ -228,43 +267,45 @@ window.MapModule = (() => {
   }
 
   /* ══════════════════════════════════════════
-     大画面モード初期化
+     大画面モード
   ══════════════════════════════════════════ */
   function initBigMap() {
     const container = document.getElementById('bigMap');
     if (!container) return;
 
-    if (bigCtx) {
-      // すでに初期化済みならリサイズだけ
-      setTimeout(onResize, 60);
-      return;
-    }
+    if (bigCtx) { setTimeout(onResize, 60); return; }
 
-    const built = buildScene(container);
-    bigCtx = {
-      ...built,
-      container,
-      pinGroup:      new THREE.Group(),
-      waveGroup:     new THREE.Group(),
-      searchPinGroup: new THREE.Group(),
+    // 大画面も高さ確定を待つ
+    const tryBuild = () => {
+      if (container.clientHeight < 10) {
+        setTimeout(tryBuild, 80);
+        return;
+      }
+      const OC    = getOrbitControls();
+      const built = buildScene(container, OC);
+      bigCtx = {
+        ...built,
+        container,
+        pinGroup:       new THREE.Group(),
+        waveGroup:      new THREE.Group(),
+        searchPinGroup: new THREE.Group(),
+      };
+      built.scene.add(bigCtx.pinGroup);
+      built.scene.add(bigCtx.waveGroup);
+      built.scene.add(bigCtx.searchPinGroup);
+
+      setupBigLabelLayer(container);
+      bindPointerEvents(built.renderer.domElement, true);
+
+      if (camera) {
+        bigCtx.camera.position.copy(camera.position);
+        bigCtx.controls.update();
+      }
+
+      animateBig();
+      if (window.DataModule) drawQuakes(window.DataModule.getQuakes());
     };
-    built.scene.add(bigCtx.pinGroup);
-    built.scene.add(bigCtx.waveGroup);
-    built.scene.add(bigCtx.searchPinGroup);
-
-    setupBigLabelLayer(container);
-    bindPointerEvents(built.renderer.domElement, true);
-
-    // カメラ位置を通常画面から同期
-    if (camera) {
-      bigCtx.camera.position.copy(camera.position);
-      bigCtx.controls.update();
-    }
-
-    animateBig();
-
-    // 現在の地震データを描画
-    if (window.DataModule) drawQuakes(window.DataModule.getQuakes());
+    setTimeout(tryBuild, 100);
   }
 
   /* ══════════════════════════════════════════
@@ -275,42 +316,36 @@ window.MapModule = (() => {
     if (globeMat) loadTexture(globeMat, type);
     if (bigCtx?.globeMat) loadTexture(bigCtx.globeMat, type);
 
-    // 衛星モード以外はラベルを自動オフ
     if (type !== 'satellite' && showLabels) {
       showLabels = false;
       updateLabelToggleUI();
       refreshLabelVisibility();
     }
-    // 地名ボタンの表示/非表示を更新
     updateLabelToggleUI();
   }
 
   /* ══════════════════════════════════════════
-     ピン（Sprite）生成 — sizeAttenuation:false で画面上一定サイズ
+     ピン（Sprite）— sizeAttenuation:false で常に一定サイズ
   ══════════════════════════════════════════ */
-  function makePinCanvas(color, withDot) {
+  function makePinCanvas(color) {
     const S = 64;
     const c = document.createElement('canvas');
     c.width = S; c.height = S;
     const ctx = c.getContext('2d');
-    // 外周グロー
     const grad = ctx.createRadialGradient(S/2, S/2, 0, S/2, S/2, S/2);
-    grad.addColorStop(0,   color);
+    grad.addColorStop(0,    color);
     grad.addColorStop(0.50, color);
-    grad.addColorStop(1,   'rgba(0,0,0,0)');
+    grad.addColorStop(1,    'rgba(0,0,0,0)');
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(S/2, S/2, S/2, 0, Math.PI*2); ctx.fill();
-    if (withDot !== false) {
-      // 中央白点
-      ctx.beginPath(); ctx.arc(S/2, S/2, S*0.15, 0, Math.PI*2);
-      ctx.fillStyle = '#ffffff'; ctx.fill();
-      ctx.lineWidth = 2.5; ctx.strokeStyle = color; ctx.stroke();
-    }
+    ctx.beginPath(); ctx.arc(S/2, S/2, S*0.15, 0, Math.PI*2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = color; ctx.stroke();
     return c;
   }
 
   function makeSprite(color, sizeScale) {
-    const tex = new THREE.CanvasTexture(makePinCanvas(color, true));
+    const tex = new THREE.CanvasTexture(makePinCanvas(color));
     const mat = new THREE.SpriteMaterial({
       map: tex, depthTest: true, depthWrite: false,
       sizeAttenuation: false, transparent: true,
@@ -329,7 +364,6 @@ window.MapModule = (() => {
     clearGroup(pinGroup);
     clearGroup(waveGroup);
     if (bigCtx) { clearGroup(bigCtx.pinGroup); clearGroup(bigCtx.waveGroup); }
-
     if (!quakes || !quakes.length) return;
 
     const showEpi  = document.getElementById('showEpicenter')?.checked !== false;
@@ -339,14 +373,14 @@ window.MapModule = (() => {
       const { lat, lng, mag } = q;
       if (lat == null || lng == null || isNaN(lat) || isNaN(lng)) return;
 
-      const pos  = latLngToVec3(lat, lng, RADIUS * 1.002);
-      const col  = CONFIG.MAG_COLOR(mag);
-      const sc   = 0.55 + Math.min(mag, 8.5) * 0.13;
+      const pos = latLngToVec3(lat, lng, RADIUS * 1.002);
+      const col = CONFIG.MAG_COLOR(mag);
+      const sc  = 0.55 + Math.min(mag, 8.5) * 0.13;
 
       if (showEpi) {
         const sp = makeSprite(col, sc);
         sp.position.copy(pos);
-        sp.userData = { q, kind: 'quake' };
+        sp.userData = { q };
         pinGroup.add(sp);
 
         if (bigCtx) {
@@ -390,14 +424,13 @@ window.MapModule = (() => {
     const cv = document.createElement('canvas');
     cv.width = S; cv.height = S;
     const ctx = cv.getContext('2d');
-    ctx.strokeStyle = color;
-    ctx.lineWidth   = 5;
+    ctx.strokeStyle = color; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.arc(S/2, S/2, S/2 - 5, 0, Math.PI*2); ctx.stroke();
 
-    const tex  = new THREE.CanvasTexture(cv);
-    const mat  = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.7,
-                                             sizeAttenuation: true, depthWrite: false });
-    const sp   = new THREE.Sprite(mat);
+    const tex = new THREE.CanvasTexture(cv);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.7,
+                                            sizeAttenuation: true, depthWrite: false });
+    const sp  = new THREE.Sprite(mat);
     sp.position.copy(center);
     const base = 1.5 + CONFIG.MAG_RADIUS(mag) * 0.08;
     sp.scale.set(base, base, 1);
@@ -412,15 +445,12 @@ window.MapModule = (() => {
       sp.scale.set(s, s, 1);
       mat.opacity = 0.65 * (1 - t);
       if (t < 1 && sp.parent) requestAnimationFrame(step);
-      else if (sp.parent) {
-        sp.parent.remove(sp);
-        tex.dispose(); mat.dispose();
-      }
+      else if (sp.parent) { sp.parent.remove(sp); tex.dispose(); mat.dispose(); }
     })(t0);
   }
 
   /* ══════════════════════════════════════════
-     検索ピン（地名ヒット時）
+     検索ピン（緑・常時一定サイズ）
   ══════════════════════════════════════════ */
   function setSearchPin(lat, lng, label) {
     clearGroup(searchPinGroup);
@@ -428,12 +458,12 @@ window.MapModule = (() => {
 
     const pos = latLngToVec3(lat, lng, RADIUS * 1.003);
 
-    const sp = makeSprite('#22c55e', 1.25);
+    const sp = makeSprite('#22c55e', 1.3);
     sp.position.copy(pos);
     searchPinGroup.add(sp);
 
     if (bigCtx) {
-      const sp2 = makeSprite('#22c55e', 1.25);
+      const sp2 = makeSprite('#22c55e', 1.3);
       sp2.position.copy(pos);
       bigCtx.searchPinGroup.add(sp2);
     }
@@ -480,7 +510,7 @@ window.MapModule = (() => {
   }
 
   /* ══════════════════════════════════════════
-     カメラ飛行（スムーズアニメーション）
+     カメラ飛行
   ══════════════════════════════════════════ */
   function flyTo(lat, lng, legacyZoom, dist) {
     const d = dist != null ? dist : zoomToDist(legacyZoom);
@@ -531,9 +561,9 @@ window.MapModule = (() => {
       document.getElementById(id)?.classList.add('active');
     };
 
-    document.getElementById('btn2d')?.addEventListener('click', () => { switchTile('standard'); setActive('btn2d'); });
+    document.getElementById('btn2d')?.addEventListener('click', () => { switchTile('standard');  setActive('btn2d'); });
     document.getElementById('btnSatellite')?.addEventListener('click', () => { switchTile('satellite'); setActive('btnSatellite'); });
-    document.getElementById('btnTerrain')?.addEventListener('click', () => { switchTile('terrain'); setActive('btnTerrain'); });
+    document.getElementById('btnTerrain')?.addEventListener('click', () => { switchTile('terrain');   setActive('btnTerrain'); });
     document.getElementById('btnReset')?.addEventListener('click', resetView);
     document.getElementById('btnHeatmap')?.addEventListener('click', () => {
       if (window.DataModule) toggleHeatmap(window.DataModule.getQuakes());
@@ -544,19 +574,18 @@ window.MapModule = (() => {
       refreshLabelVisibility();
     });
 
-    updateLabelToggleUI(); // 初期状態（衛星でないのでボタン隠す）
+    updateLabelToggleUI();
   }
 
   function updateLabelToggleUI() {
     const btn = document.getElementById('btnLabels');
     if (!btn) return;
     btn.classList.toggle('active', showLabels);
-    // 衛星モードのときだけラベルボタンを表示
     btn.style.display = (currentTileType === 'satellite') ? '' : 'none';
   }
 
   /* ══════════════════════════════════════════
-     レイヤーチェックボックス
+     レイヤートグル
   ══════════════════════════════════════════ */
   function bindLayerToggles() {
     document.getElementById('showFault')?.addEventListener('change', e => {
@@ -571,24 +600,22 @@ window.MapModule = (() => {
   }
 
   /* ══════════════════════════════════════════
-     断層線
+     断層線・プレート境界
   ══════════════════════════════════════════ */
   function drawFaultLines(grp) {
     const faults = [
       [[33.5,130.3],[33.8,131.0],[34.2,132.0],[34.6,133.5],[34.9,135.0],[35.0,136.2]],
       [[36.8,137.9],[35.8,138.1],[35.2,138.4],[34.9,138.6]],
       [[34.6,134.9],[34.8,135.1]],
-      [[34.8,135.2],[34.9,135.6]],
     ];
     faults.forEach(coords => addLine(grp, coords, 0xff3333, true));
   }
 
   function drawPlateBoundaries(grp) {
-    const plates = [
+    [
       { c: [[45,150],[42,145],[38,142],[35,142],[33,142],[30,140],[28,138]], col: 0x3b82f6 },
-      { c: [[35,140],[34,138],[33,136],[32,133],[31,131],[30,128]], col: 0xa855f7 },
-    ];
-    plates.forEach(p => addLine(grp, p.c, p.col, true));
+      { c: [[35,140],[34,138],[33,136],[32,133],[31,131],[30,128]],          col: 0xa855f7 },
+    ].forEach(p => addLine(grp, p.c, p.col, true));
   }
 
   function addLine(grp, coords, color, dashed) {
@@ -603,7 +630,7 @@ window.MapModule = (() => {
   }
 
   /* ══════════════════════════════════════════
-     クリックでポップアップ
+     クリック→モーダル
   ══════════════════════════════════════════ */
   function bindPointerEvents(domEl, isBig) {
     domEl.addEventListener('click', e => {
@@ -620,28 +647,9 @@ window.MapModule = (() => {
       const hits = rc.intersectObjects(grp.children, false);
       if (hits.length) {
         const q = hits[0].object.userData?.q;
-        if (q) showModal(q);
+        if (q && window.UIModule?.showQuakeDetail) window.UIModule.showQuakeDetail(q);
       }
     });
-  }
-
-  function showModal(q) {
-    const intensity = CONFIG.MAG_TO_INTENSITY ? CONFIG.MAG_TO_INTENSITY(q.mag) : '';
-    const depth = q.depth != null ? q.depth + ' km' : '不明';
-    const time  = formatTime(q.time);
-    const info  = [
-      `M${q.mag.toFixed(1)}${intensity ? ' (推定震度' + intensity + ')' : ''}`,
-      q.place || '',
-      `深さ: ${depth}`,
-      time,
-    ].filter(Boolean).join('\n');
-
-    // 既存の UIModule.showQuakeDetail が存在すれば使う、なければ alert フォールバック
-    if (window.UIModule?.showQuakeDetail) {
-      window.UIModule.showQuakeDetail(q);
-    } else {
-      alert(info);
-    }
   }
 
   /* ══════════════════════════════════════════
@@ -683,10 +691,8 @@ window.MapModule = (() => {
     { n:'シドニー',  lat:-33.87, lng:151.21, k:'city'   },
     { n:'オークランド', lat:-36.85, lng:174.76, k:'city'},
     { n:'アンカレジ', lat:61.22, lng:-149.90, k:'city'  },
-    { n:'カトマンズ', lat:27.70, lng:85.32,  k:'city'   },
     { n:'テヘラン',  lat:35.69, lng:51.39,   k:'city'   },
     { n:'イスタンブール', lat:41.01, lng:28.98, k:'city'},
-    // 国名ラベル
     { n:'日本',        lat:36.5, lng:138.0, k:'country' },
     { n:'中国',        lat:35.0, lng:103.0, k:'country' },
     { n:'ロシア',      lat:61.5, lng:90.0,  k:'country' },
@@ -695,49 +701,23 @@ window.MapModule = (() => {
     { n:'カナダ',      lat:56.0, lng:-106.0, k:'country' },
     { n:'ブラジル',    lat:-10.0, lng:-52.0, k:'country' },
     { n:'オーストラリア', lat:-25.0, lng:134.0, k:'country' },
-    { n:'インドネシア', lat:-2.5, lng:117.0,  k:'country' },
-    { n:'フィリピン',  lat:12.8,  lng:122.0,  k:'country' },
-    { n:'アルゼンチン', lat:-35.0, lng:-65.0, k:'country' },
-    { n:'チリ',        lat:-33.0, lng:-71.0,  k:'country' },
-    { n:'ペルー',      lat:-10.0, lng:-76.0,  k:'country' },
-    { n:'コロンビア',  lat:4.0,   lng:-74.0,  k:'country' },
-    { n:'メキシコ',    lat:23.6,  lng:-102.5, k:'country' },
-    { n:'イギリス',    lat:54.0,  lng:-2.0,   k:'country' },
-    { n:'フランス',    lat:46.5,  lng:2.5,    k:'country' },
-    { n:'ドイツ',      lat:51.0,  lng:10.0,   k:'country' },
-    { n:'イタリア',    lat:42.0,  lng:13.0,   k:'country' },
-    { n:'スペイン',    lat:40.0,  lng:-3.5,   k:'country' },
-    { n:'エジプト',    lat:26.0,  lng:30.0,   k:'country' },
-    { n:'南アフリカ',  lat:-29.0, lng:24.0,   k:'country' },
-    { n:'エチオピア',  lat:9.0,   lng:40.0,   k:'country' },
-    { n:'ナイジェリア', lat:9.0,  lng:8.0,    k:'country' },
-    { n:'トルコ',      lat:39.0,  lng:35.0,   k:'country' },
-    { n:'イラン',      lat:32.0,  lng:53.0,   k:'country' },
-    { n:'サウジアラビア', lat:24.0, lng:45.0, k:'country' },
-    { n:'パキスタン',  lat:30.0,  lng:70.0,   k:'country' },
+    { n:'インドネシア', lat:-2.5, lng:117.0, k:'country' },
+    { n:'フィリピン',  lat:12.8, lng:122.0,  k:'country' },
+    { n:'メキシコ',    lat:23.6, lng:-102.5, k:'country' },
+    { n:'イギリス',    lat:54.0, lng:-2.0,   k:'country' },
+    { n:'フランス',    lat:46.5, lng:2.5,    k:'country' },
+    { n:'ドイツ',      lat:51.0, lng:10.0,   k:'country' },
+    { n:'エジプト',    lat:26.0, lng:30.0,   k:'country' },
+    { n:'南アフリカ',  lat:-29.0, lng:24.0,  k:'country' },
+    { n:'トルコ',      lat:39.0, lng:35.0,   k:'country' },
+    { n:'韓国',        lat:36.5, lng:127.8,  k:'country' },
+    { n:'台湾',        lat:23.7, lng:121.0,  k:'country' },
     { n:'ニュージーランド', lat:-41.0, lng:174.0, k:'country' },
-    { n:'韓国',        lat:36.5,  lng:127.8,  k:'country' },
-    { n:'台湾',        lat:23.7,  lng:121.0,  k:'country' },
-    { n:'ベトナム',    lat:14.0,  lng:108.0,  k:'country' },
-    { n:'タイ',        lat:15.0,  lng:100.5,  k:'country' },
-    { n:'マレーシア',  lat:4.0,   lng:109.0,  k:'country' },
-    { n:'ミャンマー',  lat:17.0,  lng:96.0,   k:'country' },
-    { n:'カザフスタン', lat:48.0, lng:68.0,   k:'country' },
-    { n:'ウクライナ',  lat:49.0,  lng:32.0,   k:'country' },
-    { n:'スウェーデン', lat:62.0, lng:17.0,   k:'country' },
-    { n:'ノルウェー',  lat:65.0,  lng:13.0,   k:'country' },
-    { n:'フィンランド', lat:64.0, lng:26.0,   k:'country' },
-    { n:'アラスカ',    lat:64.0, lng:-153.0,  k:'country' },
-    { n:'グリーンランド', lat:72.0, lng:-42.0, k:'country' },
-    { n:'アイスランド', lat:65.0, lng:-19.0,  k:'country' },
-    { n:'モロッコ',    lat:32.0,  lng:-5.5,   k:'country' },
-    { n:'アルジェリア', lat:28.0, lng:3.0,    k:'country' },
-    { n:'リビア',      lat:26.0,  lng:17.0,   k:'country' },
-    { n:'スーダン',    lat:15.0,  lng:30.0,   k:'country' },
-    { n:'アンゴラ',    lat:-12.0, lng:18.5,   k:'country' },
-    { n:'コンゴ',      lat:-4.0,  lng:22.0,   k:'country' },
-    { n:'マダガスカル', lat:-20.0, lng:47.0,  k:'country' },
-    { n:'ネパール',    lat:28.0,  lng:84.0,   k:'country' },
+    { n:'アルゼンチン', lat:-35.0, lng:-65.0, k:'country' },
+    { n:'チリ',        lat:-33.0, lng:-71.0, k:'country' },
+    { n:'イラン',      lat:32.0, lng:53.0,   k:'country' },
+    { n:'サウジアラビア', lat:24.0, lng:45.0, k:'country' },
+    { n:'パキスタン',  lat:30.0, lng:70.0,   k:'country' },
   ];
 
   function setupLabelLayer() {
@@ -746,11 +726,7 @@ window.MapModule = (() => {
     containerEl.style.position = 'relative';
     containerEl.appendChild(labelLayer);
     LABEL_PLACES.forEach(p => {
-      const el = document.createElement('div');
-      el.className = 'globe-label globe-label-' + p.k;
-      el.textContent = p.n;
-      el.style.display = 'none';
-      el.style.pointerEvents = 'none';
+      const el = makeLabelEl(p.n, p.k);
       labelLayer.appendChild(el);
       labelEntries.push({ el, lat: p.lat, lng: p.lng, isBig: false });
     });
@@ -762,14 +738,19 @@ window.MapModule = (() => {
     container.style.position = 'relative';
     container.appendChild(bigLabelLayer);
     LABEL_PLACES.forEach(p => {
-      const el = document.createElement('div');
-      el.className = 'globe-label globe-label-' + p.k;
-      el.textContent = p.n;
-      el.style.display = 'none';
-      el.style.pointerEvents = 'none';
+      const el = makeLabelEl(p.n, p.k);
       bigLabelLayer.appendChild(el);
       labelEntries.push({ el, lat: p.lat, lng: p.lng, isBig: true });
     });
+  }
+
+  function makeLabelEl(text, cls) {
+    const el = document.createElement('div');
+    el.className = 'globe-label globe-label-' + cls;
+    el.textContent = text;
+    el.style.display = 'none';
+    el.style.pointerEvents = 'none';
+    return el;
   }
 
   let _searchLabels = [];
@@ -789,28 +770,20 @@ window.MapModule = (() => {
   }
 
   function removeSearchLabel() {
-    labelEntries = labelEntries.filter(e => {
-      if (e.alwaysOn) { e.el?.remove(); return false; }
-      return true;
-    });
+    labelEntries = labelEntries.filter(e => { if (e.alwaysOn) { e.el?.remove(); return false; } return true; });
     _searchLabels = [];
   }
 
   function refreshLabelVisibility() {
-    labelEntries.forEach(e => {
-      if (e.alwaysOn) return;
-      if (!showLabels) e.el.style.display = 'none';
-    });
+    labelEntries.forEach(e => { if (!e.alwaysOn && !showLabels) e.el.style.display = 'none'; });
   }
 
-  /* 各フレームでラベル位置を射影 */
   function updateLabels(cam, isBig) {
     if (!cam) return;
-    const domEl  = isBig ? bigCtx?.renderer?.domElement : renderer?.domElement;
+    const domEl = isBig ? bigCtx?.renderer?.domElement : renderer?.domElement;
     if (!domEl) return;
     const W = domEl.clientWidth, H = domEl.clientHeight;
     if (!W || !H) return;
-
     const camDir = cam.position.clone().normalize();
 
     labelEntries.forEach(e => {
@@ -818,9 +791,8 @@ window.MapModule = (() => {
       const visible = e.alwaysOn ? true : showLabels;
       if (!visible) { e.el.style.display = 'none'; return; }
 
-      const pos3 = latLngToVec3(e.lat, e.lng, RADIUS * 1.01);
+      const pos3   = latLngToVec3(e.lat, e.lng, RADIUS * 1.01);
       const facing = pos3.clone().normalize().dot(camDir);
-
       if (facing < 0.08) { e.el.style.display = 'none'; return; }
 
       const proj = pos3.clone().project(cam);
@@ -828,11 +800,11 @@ window.MapModule = (() => {
 
       const x = (proj.x * 0.5 + 0.5) * W;
       const y = (-proj.y * 0.5 + 0.5) * H;
-      e.el.style.display = 'block';
-      e.el.style.left  = '0';
-      e.el.style.top   = '0';
+      e.el.style.display   = 'block';
+      e.el.style.left      = '0';
+      e.el.style.top       = '0';
       e.el.style.transform = `translate(${x}px,${y}px) translate(-50%,-100%)`;
-      e.el.style.opacity = String(Math.min(1, (facing - 0.08) / 0.25));
+      e.el.style.opacity   = String(Math.min(1, (facing - 0.08) / 0.25));
     });
   }
 
@@ -862,7 +834,7 @@ window.MapModule = (() => {
   function onResize() {
     if (containerEl && camera && renderer) {
       const w = containerEl.clientWidth, h = containerEl.clientHeight;
-      if (w && h) {
+      if (w > 0 && h > 0) {
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
@@ -871,7 +843,7 @@ window.MapModule = (() => {
     if (bigCtx?.container) {
       const c = bigCtx.container;
       const w = c.clientWidth, h = c.clientHeight;
-      if (w && h) {
+      if (w > 0 && h > 0) {
         bigCtx.camera.aspect = w / h;
         bigCtx.camera.updateProjectionMatrix();
         bigCtx.renderer.setSize(w, h);
@@ -889,9 +861,6 @@ window.MapModule = (() => {
     return `${d.getFullYear()}/${p(d.getMonth()+1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
 
-  /* ══════════════════════════════════════════
-     公開 API
-  ══════════════════════════════════════════ */
   return {
     init, initBigMap, drawQuakes, focusQuake, flyTo, resetView,
     toggleHeatmap, setSearchPin, clearSearchPin, formatTime, latLngToVec3,
